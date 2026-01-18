@@ -12,6 +12,7 @@
   "dependencies": {
     "@headlessui/react": "^2.2.0",
     "@headlessui/vue": "^1.7.23",
+    "@supabase/supabase-js": "^2.90.1",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^2.4.3",
     "lucide-react": "^0.453.0",

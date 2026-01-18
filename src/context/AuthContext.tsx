@@ -1,152 +1,120 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { User, AuthContextType, Post } from '../types';
-import bcrypt from 'bcryptjs';
+// src/context/AuthContext.tsx
+import { createContext, useContext, useEffect, useState } from 'react';
+import { supabase, supabaseAuth } from '../lib/supabase';
+import type { User } from '@supabase/supabase-js';
+
+// 定义 Context 类型（贴合原有项目风格）
+interface AuthContextType {
+  user: User | null;
+  loading: boolean;
+  error: string | null;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string, username: string) => Promise<void>;
+  signOut: () => Promise<void>;
+  clearError: () => void;
+}
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Initialize default admin account if it doesn't exist
-const initializeAdmin = async () => {
-  const users = JSON.parse(localStorage.getItem('forumUsers') || '[]');
-  if (!users.some((u: any) => u.email === 'admin@admin.com')) {
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash('admin123', salt);
-    users.push({
-      email: 'admin@admin.com',
-      username: 'admin',
-      passwordHash,
-      isAdmin: true,
-    });
-    localStorage.setItem('forumUsers', JSON.stringify(users));
-  }
-};
+// 提供 Auth Context
+export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
-    const savedUser = localStorage.getItem('forumUser');
-    return savedUser ? JSON.parse(savedUser) : null;
-  });
-
+  // 监听用户登录状态
   useEffect(() => {
-    initializeAdmin();
+    // 获取当前登录用户
+    const getCurrentUser = async () => {
+      setLoading(true);
+      try {
+        const { data: { user: currentUser } } = await supabaseAuth.getUser();
+        setUser(currentUser);
+      } catch (err) {
+        setError('获取用户信息失败，请刷新页面');
+        console.error('Auth error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    // 实时监听 auth 状态变化
+    const { data: { subscription } } = supabaseAuth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    getCurrentUser();
+    return () => subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (user) {
-      localStorage.setItem('forumUser', JSON.stringify(user));
-    } else {
-      localStorage.removeItem('forumUser');
-    }
-  }, [user]);
+  // 清除错误提示
+  const clearError = () => setError(null);
 
+  // 登录逻辑（真实 Supabase 认证）
   const signIn = async (email: string, password: string) => {
-    const users = JSON.parse(localStorage.getItem('forumUsers') || '[]');
-    const user = users.find((u: any) => u.email === email);
-    
-    if (user && await bcrypt.compare(password, user.passwordHash)) {
-      setUser({
-        email: user.email,
-        username: user.username,
-        isAdmin: user.isAdmin || false,
-      });
-    } else {
-      throw new Error('Invalid credentials');
+    clearError();
+    setLoading(true);
+    try {
+      const { error } = await supabaseAuth.signInWithPassword({ email, password });
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      setError((err as Error).message || '登录失败，请检查账号密码');
+      console.error('Sign in error:', err);
+    } finally {
+      setLoading(false);
     }
   };
 
+  // 注册逻辑（同步创建用户资料）
   const signUp = async (email: string, password: string, username: string) => {
-    const users = JSON.parse(localStorage.getItem('forumUsers') || '[]');
-    
-    if (users.some((u: any) => u.email === email)) {
-      throw new Error('Email already exists');
+    clearError();
+    setLoading(true);
+    try {
+      // 1. 创建账号
+      const { data: { user }, error: authError } = await supabaseAuth.signUp({ email, password });
+      if (authError) throw new Error(authError.message);
+      if (!user) throw new Error('注册失败，未创建用户');
+
+      // 2. 同步创建用户资料（关联 profiles 表）
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .insert({ id: user.id, username });
+      if (profileError) throw new Error('用户资料创建失败');
+    } catch (err) {
+      setError((err as Error).message || '注册失败，请重试');
+      console.error('Sign up error:', err);
+    } finally {
+      setLoading(false);
     }
+  };
 
-    if (users.some((u: any) => u.username === username)) {
-      throw new Error('Username already taken');
+  // 退出登录
+  const signOut = async () => {
+    clearError();
+    setLoading(true);
+    try {
+      const { error } = await supabaseAuth.signOut();
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      setError((err as Error).message || '退出登录失败');
+      console.error('Sign out error:', err);
+    } finally {
+      setLoading(false);
     }
-
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-
-    const newUser = {
-      email,
-      username,
-      passwordHash,
-      isAdmin: false,
-    };
-
-    users.push(newUser);
-    localStorage.setItem('forumUsers', JSON.stringify(users));
-
-    setUser({
-      email,
-      username,
-      isAdmin: false,
-    });
-  };
-
-  const signOut = () => {
-    setUser(null);
-  };
-
-  const deletePost = (postId: string) => {
-    if (!user?.isAdmin) return;
-
-    const posts: Post[] = JSON.parse(localStorage.getItem('forumPosts') || '[]');
-    const updatedPosts = posts.filter(post => post.id !== postId);
-    localStorage.setItem('forumPosts', JSON.stringify(updatedPosts));
-
-    // Clean up associated comments
-    localStorage.removeItem(`comments_${postId}`);
-
-    window.dispatchEvent(new Event('storage')); // Trigger update in components
-  };
-
-  const addCategory = (name: string) => {
-    if (!user?.isAdmin) return;
-
-    const categories = JSON.parse(localStorage.getItem('forumCategories') || '[]');
-    const newCategory = {
-      id: Date.now().toString(),
-      name,
-      count: 0,
-    };
-    categories.push(newCategory);
-    localStorage.setItem('forumCategories', JSON.stringify(categories));
-    window.dispatchEvent(new Event('storage'));
-  };
-
-  const deleteCategory = (categoryId: string) => {
-    if (!user?.isAdmin) return;
-
-    const categories = JSON.parse(localStorage.getItem('forumCategories') || '[]');
-    const updatedCategories = categories.filter((cat: any) => cat.id !== categoryId);
-    localStorage.setItem('forumCategories', JSON.stringify(updatedCategories));
-    window.dispatchEvent(new Event('storage'));
-  };
-
-  const value = {
-    user,
-    signIn,
-    signUp,
-    signOut,
-    isAuthenticated: !!user,
-    isAdmin: !!user?.isAdmin,
-    deletePost,
-    addCategory,
-    deleteCategory,
   };
 
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContext.Provider value={{ user, loading, error, signIn, signUp, signOut, clearError }}>
       {children}
     </AuthContext.Provider>
   );
-}
+};
 
-export function useAuth() {
+// 自定义 Hook 供组件使用
+export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
+  if (!context) {
+    throw new Error('useAuth 必须在 AuthProvider 内使用');
   }
   return context;
-}
+};

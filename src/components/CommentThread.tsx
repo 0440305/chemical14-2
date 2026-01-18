@@ -1,102 +1,140 @@
-import { ArrowBigUp, CornerDownRight } from 'lucide-react';
-import { Comment } from '../types';
-import CommentInput from './CommentInput';
+// src/components/CommentThread.tsx
+import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
+import type { Comment } from '../types/db';
 
 interface CommentThreadProps {
-  comment: Comment;
-  comments: Comment[];
-  onUpvote: (commentId: string) => void;
-  onReply: (commentId: string) => void;
-  onAddReply: (content: string, parentId: string) => void;
-  replyToId: string | null;
-  currentUser: string | undefined;
-  depth?: number;
+  postId: string;
 }
 
-export default function CommentThread({
-  comment,
-  comments,
-  onUpvote,
-  onReply,
-  onAddReply,
-  replyToId,
-  currentUser,
-  depth = 0
-}: CommentThreadProps) {
-  const replies = comments.filter(c => c.parentId === comment.id);
-  const isReplyOpen = replyToId === comment.id;
-  const hasUpvoted = currentUser && comment.upvotedBy.includes(currentUser);
-  const maxDepth = 4; // Maximum nesting level
+const CommentThread = ({ postId }: CommentThreadProps) => {
+  const { user } = useAuth();
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [newComment, setNewComment] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [fetching, setFetching] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // 加载评论列表
+  const fetchComments = async () => {
+    setFetching(true);
+    try {
+      const { data, error } = await supabase
+        .from('comments')
+        .select(`
+          *,
+          author:profiles(username)
+        `)
+        .eq('post_id', postId)
+        .order('created_at', { ascending: true });
+      if (error) throw new Error(error.message);
+      setComments(data as Comment[]);
+    } catch (err) {
+      setError('加载评论失败');
+      console.error('Fetch comments error:', err);
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchComments();
+    // 监听评论变化（可选，实时更新）
+    const subscription = supabase
+      .channel(`comments:${postId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'comments', filter: `post_id=eq.${postId}` },
+        () => fetchComments()
+      )
+      .subscribe();
+    return () => supabase.removeChannel(subscription);
+  }, [postId]);
+
+  // 提交评论
+  const handleSubmitComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      setError('请先登录');
+      return;
+    }
+    if (!newComment.trim()) {
+      setError('评论内容不能为空');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const { error } = await supabase
+        .from('comments')
+        .insert({
+          post_id: postId,
+          content: newComment,
+          author_id: user.id,
+        });
+      if (error) throw new Error(error.message);
+
+      // 重置输入框 + 重新加载评论
+      setNewComment('');
+      await fetchComments();
+    } catch (err) {
+      setError((err as Error).message || '发布评论失败');
+      console.error('Create comment error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 格式化时间
+  const formatDate = (dateStr: string) => {
+    return new Date(dateStr).toLocaleString('zh-CN');
+  };
+
+  if (fetching) return <div className="text-center py-2">加载评论中...</div>;
 
   return (
-    <div className="group">
-      <div className="flex space-x-3">
-        <div className="flex-shrink-0">
-          <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
-            <span className="text-sm font-medium text-gray-600">
-              {comment.author[0].toUpperCase()}
-            </span>
-          </div>
-        </div>
-        <div className="flex-1 space-y-2">
-          <div className="flex items-center space-x-2">
-            <span className="text-sm font-medium text-gray-900">{comment.author}</span>
-            <span className="text-sm text-gray-500">{comment.createdAt}</span>
-          </div>
-          <div className="text-sm text-gray-600">
-            {comment.content}
-          </div>
-          <div className="flex items-center space-x-4">
-            <button
-              onClick={() => onUpvote(comment.id)}
-              className={`flex items-center space-x-1 text-sm ${
-                hasUpvoted ? 'text-blue-600' : 'text-gray-500 hover:text-blue-600'
-              }`}
-            >
-              <ArrowBigUp className="h-4 w-4" />
-              <span>{comment.upvotes}</span>
-            </button>
-            
-            {depth < maxDepth && currentUser && (
-              <button
-                onClick={() => onReply(comment.id)}
-                className="flex items-center space-x-1 text-sm text-gray-500 hover:text-blue-600"
-              >
-                <CornerDownRight className="h-4 w-4" />
-                <span>Reply</span>
-              </button>
-            )}
-          </div>
+    <div className="mt-4 border-t pt-4">
+      <h4 className="font-medium mb-2">评论区</h4>
+      {/* 发布评论表单 */}
+      <form onSubmit={handleSubmitComment} className="mb-4 space-y-2">
+        {error && <p className="text-red-500 text-sm">{error}</p>}
+        <textarea
+          value={newComment}
+          onChange={(e) => setNewComment(e.target.value)}
+          rows={3}
+          className="w-full p-2 border rounded text-sm"
+          placeholder="写下你的评论..."
+          disabled={loading || !user}
+        />
+        <button
+          type="submit"
+          className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:bg-gray-400"
+          disabled={loading || !user}
+        >
+          {loading ? '发布中...' : '发布评论'}
+        </button>
+      </form>
 
-          {isReplyOpen && currentUser && (
-            <div className="mt-3">
-              <CommentInput
-                onSubmit={(content) => onAddReply(content, comment.id)}
-                placeholder={`Reply to ${comment.author}...`}
-                autoFocus
-              />
+      {/* 评论列表 */}
+      {comments.length === 0 ? (
+        <p className="text-gray-500 text-sm">暂无评论</p>
+      ) : (
+        <div className="space-y-3">
+          {comments.map((comment) => (
+            <div key={comment.id} className="p-2 bg-gray-50 rounded">
+              <div className="text-xs text-gray-500 mb-1">
+                <span>{comment.author?.username || '未知用户'}</span> | 
+                <span> {formatDate(comment.created_at)}</span>
+              </div>
+              <p className="text-sm">{comment.content}</p>
             </div>
-          )}
-        </div>
-      </div>
-
-      {replies.length > 0 && (
-        <div className={`mt-3 pl-11 space-y-3 ${depth >= maxDepth ? 'opacity-70' : ''}`}>
-          {replies.map((reply) => (
-            <CommentThread
-              key={reply.id}
-              comment={reply}
-              comments={comments}
-              onUpvote={onUpvote}
-              onReply={onReply}
-              onAddReply={onAddReply}
-              replyToId={replyToId}
-              currentUser={currentUser}
-              depth={depth + 1}
-            />
           ))}
         </div>
       )}
     </div>
   );
-}
+};
+
+export default CommentThread;
